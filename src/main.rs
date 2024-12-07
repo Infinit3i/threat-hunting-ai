@@ -1,121 +1,196 @@
+mod search;
+
 use eframe::egui;
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
+use pulldown_cmark::Parser;
 
-const FILE_PATH: &str = "todo_list.json";
+const KNOWLEDGE_DIR: &str = "knowledge";
 
-#[derive(Serialize, Deserialize, Clone)]
-struct Task {
-    description: String,
-    done: bool,
+pub struct KnowledgeApp {
+    subdirectories: HashMap<String, Vec<String>>,
+    active_subdir: Option<String>,
+    selected_file: Option<String>,
+    file_content: String,
+    search_query: String,
+    search_results: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct TodoList {
-    tasks: Vec<Task>,
-}
-
-impl TodoList {
-    fn load() -> Self {
-        match fs::read_to_string(FILE_PATH) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| Self { tasks: vec![] }),
-            Err(_) => Self { tasks: vec![] },
-        }
-    }
-
-    fn save(&self) {
-        let content = serde_json::to_string_pretty(self).expect("Failed to serialize tasks");
-        fs::write(FILE_PATH, content).expect("Failed to save tasks");
-    }
-
-    fn add_task(&mut self, description: String) {
-        self.tasks.push(Task {
-            description,
-            done: false,
-        });
-        self.save();
-    }
-
-    fn toggle_done(&mut self, index: usize) {
-        if let Some(task) = self.tasks.get_mut(index) {
-            task.done = !task.done;
-            self.save();
-        }
-    }
-
-    fn remove_task(&mut self, index: usize) {
-        if index < self.tasks.len() {
-            self.tasks.remove(index);
-            self.save();
-        }
-    }
-}
-
-pub struct TodoApp {
-    todo_list: TodoList,
-    new_task: String,
-}
-
-impl TodoApp {
+impl KnowledgeApp {
     fn new() -> Self {
-        Self {
-            todo_list: TodoList::load(),
-            new_task: String::new(),
+        if !Path::new(KNOWLEDGE_DIR).exists() {
+            fs::create_dir(KNOWLEDGE_DIR).expect("Failed to create knowledge directory");
         }
+
+        Self {
+            subdirectories: KnowledgeApp::scan_subdirectories(),
+            active_subdir: None,
+            selected_file: None,
+            file_content: String::new(),
+            search_query: String::new(),
+            search_results: Vec::new(),
+        }
+    }
+
+    /// Scan the `knowledge` directory and group files by subdirectory.
+    fn scan_subdirectories() -> HashMap<String, Vec<String>> {
+        let mut subdirs = HashMap::new();
+
+        fn collect_files(dir: &Path, subdirs: &mut HashMap<String, Vec<String>>) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        collect_files(&path, subdirs);
+                    } else if path.is_file() {
+                        let subdir = path.parent().unwrap_or(dir).strip_prefix(KNOWLEDGE_DIR).unwrap();
+                        let subdir_name = subdir.to_str().unwrap_or("Unknown").to_string();
+                        subdirs
+                            .entry(subdir_name)
+                            .or_insert_with(Vec::new)
+                            .push(path.file_name().unwrap().to_str().unwrap().to_string());
+                    }
+                }
+            }
+        }
+
+        collect_files(Path::new(KNOWLEDGE_DIR), &mut subdirs);
+        subdirs
+    }
+
+    /// Load the content of a file.
+    fn load_file(&mut self, file_name: &str) {
+        let file_path = if let Some(active_subdir) = &self.active_subdir {
+            format!("{}/{}/{}", KNOWLEDGE_DIR, active_subdir, file_name)
+        } else {
+            format!("{}/{}", KNOWLEDGE_DIR, file_name)
+        };
+
+        match fs::read_to_string(file_path) {
+            Ok(content) => {
+                self.file_content = content;
+                self.selected_file = Some(file_name.to_string());
+            }
+            Err(err) => {
+                eprintln!("Error reading file: {}", err);
+                self.file_content.clear();
+            }
+        }
+    }
+
+    /// Perform the search and update the results.
+    fn perform_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_results.clear();
+            return;
+        }
+
+        // Combine filename and content search results
+        let mut results = search::search_filenames(&self.search_query);
+        results.extend(search::search_files(&self.search_query));
+        results.sort();
+        results.dedup(); // Remove duplicates
+        self.search_results = results;
     }
 }
 
-impl eframe::App for TodoApp {
+impl eframe::App for KnowledgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("To-Do List");
-
-            // Input for new task
+        // Top navigation bar
+        egui::TopBottomPanel::top("Top Nav").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.new_task);
-                if ui.button("Add").clicked() && !self.new_task.is_empty() {
-                    self.todo_list.add_task(self.new_task.clone());
-                    self.new_task.clear();
-                }
-            });
-
-            ui.separator();
-
-            // Render tasks
-            let tasks: Vec<(usize, Task)> = self
-                .todo_list
-                .tasks
-                .iter()
-                .enumerate()
-                .map(|(i, task)| (i, task.clone()))
-                .collect();
-
-            let mut tasks_to_remove = vec![];
-            let mut tasks_to_toggle = vec![];
-
-            for (i, task) in tasks {
-                ui.horizontal(|ui| {
-                    let mut done = task.done;
-                    if ui.checkbox(&mut done, "").clicked() {
-                        tasks_to_toggle.push(i);
+                for subdir in self.subdirectories.keys() {
+                    if ui.button(subdir).clicked() {
+                        self.active_subdir = Some(subdir.clone());
+                        self.selected_file = None;
+                        self.search_query.clear();
+                        self.search_results.clear();
                     }
-                    ui.label(if task.done {
-                        format!("✔ {}", task.description)
-                    } else {
-                        task.description.clone()
-                    });
-                    if ui.button("❌").clicked() {
-                        tasks_to_remove.push(i);
+                }
+                ui.separator();
+
+                // Search Bar
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    if ui.text_edit_singleline(&mut self.search_query).changed() {
+                        self.perform_search();
+                    }
+                    if ui.button("Clear").clicked() {
+                        self.search_query.clear();
+                        self.search_results.clear();
                     }
                 });
-            }
+            });
+        });
 
-            // Apply changes
-            for &i in tasks_to_toggle.iter() {
-                self.todo_list.toggle_done(i);
-            }
-            for &i in tasks_to_remove.iter().rev() {
-                self.todo_list.remove_task(i);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if !self.search_results.is_empty() {
+                // Display search results
+                ui.heading("Search Results:");
+                ui.separator();
+
+                let results = self.search_results.clone(); // Clone the results to avoid borrow conflicts
+                for result in results {
+                    if ui.button(&result).clicked() {
+                        self.load_file(&result);
+                        self.search_results.clear(); // Clear after using cloned results
+                        break; // Exit the loop after clearing to avoid using invalidated references
+                    }
+                }
+            } else if let Some(selected) = self.selected_file.clone() {
+                // Display the selected file content
+                ui.horizontal(|ui| {
+                    ui.heading(format!("Viewing: {}", selected));
+                    if ui.button("Back").clicked() {
+                        self.selected_file = None;
+                    }
+                });
+                ui.separator();
+
+                // Parse Markdown and render content
+                let parser = Parser::new(&self.file_content);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for event in parser {
+                        match event {
+                            pulldown_cmark::Event::Start(tag) => match tag {
+                                pulldown_cmark::Tag::Heading(level, _, _) => {
+                                    let text = format!("{}\n", "#".repeat(level as usize));
+                                    ui.label(egui::RichText::new(text).heading());
+                                }
+                                pulldown_cmark::Tag::Paragraph => {
+                                    ui.separator();
+                                }
+                                _ => {}
+                            },
+                            pulldown_cmark::Event::Text(text) => {
+                                ui.label(egui::RichText::new(text.to_string()).text_style(egui::TextStyle::Body));
+                            }
+                            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => {
+                                ui.add_space(5.0); // Add vertical spacing for line breaks
+                            }
+                            pulldown_cmark::Event::End(_) => {
+                                ui.add_space(10.0); // Add spacing between blocks
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            } else if let Some(active_subdir) = &self.active_subdir {
+                // Display the files in the active subdirectory
+                ui.heading(format!("Files in {}", active_subdir));
+                ui.separator();
+
+                if let Some(files) = self.subdirectories.get(active_subdir).cloned() {
+                    for file in files {
+                        if ui.button(&file).clicked() {
+                            self.load_file(&file);
+                        }
+                    }
+                }
+            } else {
+                // Default message
+                ui.heading("Select a subdirectory or perform a search.");
             }
         });
     }
@@ -124,8 +199,8 @@ impl eframe::App for TodoApp {
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions::default();
     eframe::run_native(
-        "To-Do App",
+        "Knowledge App",
         options,
-        Box::new(|_cc| Box::new(TodoApp::new())),
+        Box::new(|_cc| Box::new(KnowledgeApp::new())),
     )
 }
