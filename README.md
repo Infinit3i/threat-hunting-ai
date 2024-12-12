@@ -20,3 +20,4 @@ rustc main.rs
 - main page
 - session
 - better looking front end
+- add all notes from "Cyber", GMON, GCFA
