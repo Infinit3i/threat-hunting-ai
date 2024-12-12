@@ -1,0 +1,4 @@
+#nas #server 
+NAS (Network Attached Storage) is primarily designed for file storage and sharing over a network, optimized for easy access by multiple users, and typically features a user-friendly interface for setup and management. 
+
+In contrast, a traditional server serves a broader range of purposes, providing various services such as hosting applications, virtual machines and databases, and requires more technical knowledge for configuration and maintenance. While NAS solutions are generally simpler to manage, servers offer greater versatility for complex tasks. For more details, you can check out [What is NAS?](https://www.howtogeek.com/712649/what-is-nas-network-attached-storage/) and [What is a Server?](https://www.techtarget.com/whatis/definition/server).
